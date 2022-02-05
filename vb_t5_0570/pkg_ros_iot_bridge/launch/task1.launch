@@ -1,0 +1,34 @@
+<launch>
+    
+    <node pkg="pkg_task1" type="node_iot_action_client_turtle.py" name="node_iot_action_client_turtle" output="screen"/>
+ 
+    <node pkg="pkg_task1" type="node_simple_action_server_turtle.py" name="node_simple_action_server_turtle" output="screen"/>
+    <node pkg="turtlesim" type="turtlesim_node" name="turtlesim" output="screen"/>
+    <node pkg="pkg_ros_iot_bridge" type="node_action_server_ros_iot_bridge.py" name="node_action_server_ros_iot_bridge" 
+    output="screen"/>
+ 
+    <node pkg="pkg_task1" type="shell_webpages_launch.sh" name="shell_webpages_launch" output="screen">
+        <param name="cmd" value="$ pkg_task1/launch/shell_webpages_launch.sh"/>
+    </node>
+
+    <rosparam file ="$(find pkg_ros_iot_bridge)/config/config_iot.yaml"/> 
+
+    
+    <arg name="record" default="false"/>
+    <arg name="duration" default="180"/>
+    <arg name="rec_name" default="turtle1.bag"/>
+
+    <group if="$(arg record)">
+
+        <node name="rosbag_record_turtle" pkg="rosbag" type="record"
+            args="record -O $(find pkg_task1)/bag_files/$(arg rec_name) --duration=$(arg duration) --chunksize=10 /turtle1/cmd_vel /turtle1/pose"    output="screen"/>
+
+    </group>
+
+
+    
+</launch>
+
+
+
+

@@ -1,0 +1,17 @@
+# Config file to store intervals at which to place online orders
+online_order_config:
+  mqtt_server_url: "broker.mqttdashboard.com"
+  mqtt_server_port: 1883
+  mqtt_qos: 0
+  mqtt_unique_id: "kanishka"
+
+online_order_intervals:
+  package_1: 5
+  package_2: 10
+  package_3: 15
+  package_4: 20
+  package_5: 25
+  package_6: 30
+  package_7: 35
+  package_8: 40
+  package_9: 45

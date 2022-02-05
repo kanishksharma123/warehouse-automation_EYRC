@@ -1,0 +1,840 @@
+#!/usr/bin/env python
+
+import rospy
+import cv2
+import sys
+from std_msgs.msg import String
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge, CvBridgeError
+import actionlib
+from math import pi
+import rospkg
+import moveit_commander
+import moveit_msgs.msg
+import geometry_msgs.msg
+from moveit_commander.conversions import pose_to_list
+from pkg_vb_sim.srv import vacuumGripper,vacuumGripperRequest
+from pkg_vb_sim.srv import conveyorBeltPowerMsg,conveyorBeltPowerMsgRequest
+import math
+from pkg_vb_sim.msg import LogicalCameraImage
+from hrwros_gazebo.msg import LogicalCameraImage, Model
+from pkg_ros_iot_bridge.msg import msgMqttSub 
+from pyzbar.pyzbar import decode
+import json 
+from pkg_ros_iot_bridge.msg import msgIotRosAction      # Message Class that is used by ROS Actions internally
+from pkg_ros_iot_bridge.msg import msgIotRosGoal        # Message Class that is used for Goal Messages
+from pkg_ros_iot_bridge.msg import msgIotRosResult      # Message Class that is used for Result Messages
+from pkg_ros_iot_bridge.msg import msgIotRosFeedback  
+from datetime import datetime, timedelta
+import time
+from Queue import PriorityQueue
+from datetime import datetime, timedelta
+import datetime 
+global a,b,c,d,e,f,g,h,i,res
+global city_queue,orderid_queue
+city_queue=[]
+orderid_queue=[]
+
+
+
+
+
+
+
+
+
+
+class Camera1(object):
+    """
+    class for carrying out various functions related to ur5_2 and logical cameras and color cameras 
+    """
+    def __init__(self,arg_robot_name):
+        """
+        constructor to initialize all the different values 
+        """
+        rospy.init_node('node_qr', anonymous=True)
+
+        self._robot_ns = '/'  + arg_robot_name
+        self._planning_group = "manipulator"
+        
+        self._commander = moveit_commander.roscpp_initialize(sys.argv)
+        self._robot = moveit_commander.RobotCommander(robot_description= self._robot_ns + "/robot_description", ns=self._robot_ns)
+        self._scene = moveit_commander.PlanningSceneInterface(ns=self._robot_ns)
+        self._group = moveit_commander.MoveGroupCommander(self._planning_group, robot_description= self._robot_ns + "/robot_description", ns=self._robot_ns,wait_for_servers=0)
+        self._display_trajectory_publisher = rospy.Publisher( self._robot_ns + '/move_group/display_planned_path', moveit_msgs.msg.DisplayTrajectory, queue_size=1)
+        self._exectute_trajectory_client = actionlib.SimpleActionClient( self._robot_ns + '/execute_trajectory', moveit_msgs.msg.ExecuteTrajectoryAction)
+        self._exectute_trajectory_client.wait_for_server()
+
+        self._planning_frame = self._group.get_planning_frame()
+        self._eef_link = self._group.get_end_effector_link()
+        self._group_names = self._robot.get_group_names()
+        self._box_name = 'Box_0'
+        self.pkg=""
+        self.y_val=0
+        self.temp=0
+        self.x=""
+        self.queue=[]
+        global a
+        a=1
+
+        # Attribute to store computed trajectory by the planner 
+        self._computed_plan = ''
+
+        # Current State of the Robot is needed to add box to planning scene
+        self._curr_state = self._robot.get_current_state()
+
+
+
+        rp = rospkg.RosPack()
+        self._pkg_path = rp.get_path('pkg_moveit_examples')
+        self._file_path = self._pkg_path + '/config/saved_trajectories/'
+        #rospy.loginfo( "Package Path: {}".format(self._file_path) )    
+
+        
+        self.bridge = CvBridge()
+        
+
+
+
+        # Initialize Action Client
+        self._ac = actionlib.ActionClient('/action_iot_ros',
+                                          msgIotRosAction)
+        
+        # Dictionary to Store all the goal handels
+        self._goal_handles = {}
+        self.city_queue = []
+        self.orderid_queue = []
+        # Store the MQTT Topic on which to Publish in a variable
+        param_config_iot = rospy.get_param('config_iot')
+        self._config_mqtt_pub_topic = param_config_iot['mqtt']['topic_pub']
+
+        # Wait for Action Server that will use the action - '/action_iot_ros' to start
+        self._ac.wait_for_server()
+        rospy.loginfo("Action server up, we can send goals.")
+
+        self.already_called=False
+        self.already_called2=False
+        self.already_called3=False
+        self.already_called4=False
+        self.already_called5=False
+        self.already_called6=False
+        self.already_called7=False
+        self.already_called8=False
+        self.already_called9=False
+        self._cost=""
+        self.prior=""
+        self.order_id=""
+        self.city=""
+        self.x=""
+        self.prior=""
+        self.qty=""
+        self._cost=""
+        self.res= {}
+        
+    
+    def on_transition(self, goal_handle):
+        """
+
+        This function will be called when there is a change of state in the Action Client State Machine
+        
+        from on_goal() to on_transition(). goal_handle generated by send_goal() is used here.
+        """
+        result = msgIotRosResult()
+
+        index = 0
+        for i in self._goal_handles:
+            if self._goal_handles[i] == goal_handle:
+                index = i
+                break
+
+        rospy.loginfo("Transition Callback. Client Goal Handle #: " + str(index))
+        rospy.loginfo("Comm. State: " + str(goal_handle.get_comm_state()) )
+        rospy.loginfo("Goal Status: " + str(goal_handle.get_goal_status()) )
+        
+        # Comm State - Monitors the State Machine of the Client which is different from Server's
+        # Comm State = 2 -> Active
+        # Comm State = 3 -> Wating for Result
+        # Comm State = 7 -> Done
+        
+        # if (Comm State == ACTIVE)
+        if goal_handle.get_comm_state() == 2:
+            rospy.loginfo(str(index) + ": Goal just went active.")
+        
+        # if (Comm State == DONE)
+        if goal_handle.get_comm_state() == 7:
+            rospy.loginfo(str(index) + ": Goal is DONE")
+            rospy.loginfo(goal_handle.get_terminal_state())
+            
+            # get_result() gets the result produced by the Action Server
+            result = goal_handle.get_result()
+            rospy.loginfo(result.flag_success)
+
+            if (result.flag_success == True):
+                rospy.loginfo("Goal successfully completed. Client Goal Handle #: " + str(index))
+            else:
+                rospy.loginfo("Goal failed. Client Goal Handle #: " + str(index))
+    def sheetpush(argv,arg_sku,arg_item,arg_prior,arg_sno,arg_cost,arg_quantity):
+        """
+        function to push sata to inventory spreadsheet
+        """
+        ur5= Camera1(sys.argv[1])
+        dict_payload = {
+        "Team id" : "vb_0570",
+        "Unique Id" : "kanishka",
+        "SKU": arg_sku,
+        "Item":arg_item ,             
+        "Priority": arg_prior,
+        "Storage Number": arg_sno,
+        "Cost": arg_cost,
+        "Quantity":arg_quantity
+        }
+        str_payload = json.dumps(dict_payload)
+        ur5.send_goal("http","pub0","NA",str_payload)
+
+    def sheetpush_shipped(argv,arg_orderid,city,arg_item,arg_prior,arg_quantity,arg_cost,arg_status,ship_date_time,est_time):
+        """
+        function to push data to 'OrdersShipped' spreadsheet
+        """
+        ur5= Camera1(sys.argv[1])
+        dict_payload1 = {
+        "Team id" : "vb_0570",
+        "Unique Id" : "kanishka",
+        "Order ID": arg_orderid,
+        "City":city  ,
+        
+        "Item":arg_item ,             
+        "Priority": arg_prior,
+        "Shipped Quantity": arg_quantity,
+        "Cost":arg_cost,
+        "Shipped Status":arg_status ,
+        "Shipped Date and Time":ship_date_time ,  #self.get_time_str()
+        "Estimated Time of Delivery":est_time
+        
+        }
+        str_payload1 = json.dumps(dict_payload1)
+        ur5.send_goal("http","pubs","NA",str_payload1)
+
+    def sheetpush_dashboard(argv,arg_orderid,city,arg_item,arg_prior,arg_quantity,arg_cost,arg_status,ship_date_time,est_time):
+        """
+        function to push data to 'Dashboard' spreadsheet
+        """
+        ur5= Camera1(sys.argv[1])
+        dict_payload1 = {
+        "Team id" : "vb_0570",
+        "Unique Id" : "kanishka",
+        "Order ID": arg_orderid,
+        "City":city  ,
+        
+        "Item":arg_item ,             
+        "Priority": arg_prior,
+        "Shipped Quantity": arg_quantity,
+        "Cost":arg_cost,
+        "Shipped Status":arg_status ,
+        "Shipped Date and Time":ship_date_time ,  #self.get_time_str()
+        "Estimated Time of Delivery":est_time
+        
+        }
+        str_payload1 = json.dumps(dict_payload1)
+        ur5.send_goal("http","pubs","NA",str_payload1)
+
+
+    
+    def send_goal(self, arg_protocol, arg_mode, arg_topic, arg_message):
+        """
+        This function is used to send Goals to Action Server
+
+        Create a Goal Message object 'goal' 
+        """
+        
+
+
+
+        goal = msgIotRosGoal()
+
+        goal.protocol = arg_protocol
+        goal.mode = arg_mode
+        goal.topic = arg_topic
+        goal.message = arg_message
+        
+
+        rospy.loginfo("Send goal.")
+        
+        # self.on_transition - It is a function pointer to a function which will be called when 
+        #                       there is a change of state in the Action Client State Machine
+        goal_handle = self._ac.send_goal(goal,
+                                         self.on_transition,
+                                         None)
+
+        return goal_handle        
+        
+
+    
+
+    def call(self,data):                     
+        """
+        callback function for getting values from 2D camera
+        """
+        global color00,color01,color02,color10,color11,color12,color20,color21,color22,a
+        ur5= Camera1(sys.argv[1])
+
+
+        try:
+          cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
+        except CvBridgeError as e:
+          rospy.logerr(e)
+
+        (rows,cols,channels) = cv_image.shape
+        
+        image = cv_image
+
+        
+        
+
+
+        barcodes = decode(image)
+
+        # loop over the detected barcodes
+        for barcode in barcodes:
+            # extract the bounding box location of the barcode and draw the
+            # bounding box surrounding the barcode on the image
+            (x, y, w, h) = barcode.rect
+            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 0, 255), 2)
+
+            # the barcode data is a bytes object so if we want to draw it on
+            # our output image we need to convert it to a string first
+            barcodeData = barcode.data.decode("utf-8")
+            barcodeType = barcode.type
+            left=barcode.rect.left
+            top=barcode.rect.top
+            #my_string = '2019-10-31'
+            #date = datetime.date.today()
+            current_time = datetime.datetime.now()
+            if left==502 and top==315:
+                color02=barcodeData
+                if not self.already_called:
+                    print("hoooooooooooooooooooooooooooo")
+                    #today = date.today()
+                    if current_time.month>9:
+                        month=str(current_time.month)
+                    else:
+                        month='0'+str(current_time.month)    
+                    ur5.sheetpush(color02[0].upper()+"02"+month+str(current_time.year)[-2:],"Clothes","LP","02","100","1")
+                self.already_called = True
+               
+            if left==316 and top==316:
+                color01=barcodeData
+                if not self.already_called2:
+                    print("hoooooooooooooooooooooooooooo")
+                    if current_time.month>9:
+                        month=str(current_time.month)
+                    else:
+                        month='0'+str(current_time.month)    
+                        ur5.sheetpush(color01[0].upper()+"01"+month+str(current_time.year)[-2:],"Food","MP","01","250","1")
+                self.already_called2 = True                
+            if left==316 and top==496:
+                color11=barcodeData
+                if not self.already_called3:
+                    print("hoooooooooooooooooooooooooooo")
+                    if current_time.month>9:
+                        month=str(current_time.month)
+                    else:
+                        month='0'+str(current_time.month)                     
+                    ur5.sheetpush(color11[0].upper()+"11"+month+str(current_time.year)[-2:],"Food","MP","11","250","1")
+                self.already_called3 = True                
+            if left==502 and top==495:
+                color12=barcodeData
+                if not self.already_called4:
+                    print("hoooooooooooooooooooooooooooo")
+                    if current_time.month>9:
+                        month=str(current_time.month)
+                    else:
+                        month='0'+str(current_time.month)                     
+
+                    ur5.sheetpush(color12[0].upper()+"12"+month+str(current_time.year)[-2:],"Medicines","HP","12","450","1")
+                self.already_called4 = True                
+            if left==128 and top==643:
+
+                color20=barcodeData
+                if not self.already_called5:
+                    print("hoooooooooooooooooooooooooooo")
+                    if current_time.month>9:
+                        month=str(current_time.month)
+                    else:
+                        month='0'+str(current_time.month)                     
+                    ur5.sheetpush(color20[0].upper()+"20"+month+str(current_time.year)[-2:],"Clothes","LP","20","100","1")
+                self.already_called5 = True                
+            if left==315 and top==643:
+                color21=barcodeData
+                if not self.already_called6:
+                    print("hoooooooooooooooooooooooooooo")
+                    if current_time.month>9:
+                        month=str(current_time.month)
+                    else:
+                        month='0'+str(current_time.month)                     
+
+
+                    ur5.sheetpush(color21[0].upper()+"21"+month+str(current_time.year)[-2:],"Medicines","HP","21","450","1")
+                self.already_called6 = True                
+            if left==503 and top==643:
+                color22=barcodeData
+                if not self.already_called7:
+                    print("hoooooooooooooooooooooooooooo")
+                    
+                    if current_time.month>9:
+                        month=str(current_time.month)
+                    else:
+                        month='0'+str(current_time.month) 
+                    ur5.sheetpush(color22[0].upper()+"22"+month+str(current_time.year)[-2:],"Food","MP","22","250","1")
+                self.already_called7 = True                
+            if not self.already_called8:
+                color10="green"
+                print("hoooooooooooooooooooooooooooo")
+                if current_time.month>9:
+                    month=str(current_time.month)
+                else:
+                    month='0'+str(current_time.month)                 
+                ur5.sheetpush(color10[0].upper()+"10"+month+str(current_time.year)[-2:],"Clothes","LP","10","100","1")
+            self.already_called8 = True            
+            if not self.already_called9:
+                color00="red"
+                print("hoooooooooooooooooooooooooooo")
+                if current_time.month>9:
+                    month=str(current_time.month)
+                else:
+                    month='0'+str(current_time.month)             
+                ur5.sheetpush(color00[0].upper()+"00"+month+str(current_time.year)[-2:],"Medicines","HP","00","450","1")
+            self.already_called9 = True                                                    
+                                             
+            
+            # draw the barcode data and barcode type on the image
+            text = "{}({}{})".format(barcodeData,left,top)
+            cv2.putText(image, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (0, 0, 255), 2)
+            resized_image = cv2.resize(image, (720/2, 1280/2)) 
+   
+        cv2.waitKey(3)
+
+
+
+
+
+
+
+    def conveyor(self,powe):                                             
+        """
+        Function to set speed of conveyor belt takes required power as arguement
+        """
+        rospy.wait_for_service('/eyrc/vb/conveyor/set_power')
+        act_serv=rospy.ServiceProxy('/eyrc/vb/conveyor/set_power',conveyorBeltPowerMsg)
+        cb=conveyorBeltPowerMsgRequest()
+        cb.power=powe
+        res=act_serv(cb)
+
+    def gripper(self,on):                                             
+        """
+        Function to set operation on vacuum gripper, Takes True to activate and '' to deactivate 
+        """
+        rospy.wait_for_service('/eyrc/vb/ur5/activate_vacuum_gripper/ur5_2')
+        activate=rospy.ServiceProxy('/eyrc/vb/ur5/activate_vacuum_gripper/ur5_2',vacuumGripper)
+        b=vacuumGripperRequest()
+        b.activate_vacuum_gripper=on
+        res=activate(bool(on))
+
+    def set_joint_angles(self, arg_list_joint_angles):
+
+        list_joint_values = self._group.get_current_joint_values()
+
+
+        self._group.set_joint_value_target(arg_list_joint_angles)
+        self._computed_plan = self._group.plan()
+        flag_plan = self._group.go(wait=True)
+
+        list_joint_values = self._group.get_current_joint_values()
+
+
+        pose_values = self._group.get_current_pose().pose
+
+
+        if (flag_plan == True):
+            pass
+
+        else:
+            pass
+
+
+        return flag_plan
+    
+    def hard_set_joint_angles(self, arg_list_joint_angles, arg_max_attempts):
+        """
+        function passes no of attempts and required joint angles to set_joint_angles 
+        """
+        number_attempts = 0
+        flag_success = False
+        
+        while ( (number_attempts <= arg_max_attempts) and  (flag_success is False) ):
+            number_attempts += 1
+            flag_success = self.set_joint_angles(arg_list_joint_angles)
+            rospy.logwarn("attempts: {}".format(number_attempts) )
+            # self.clear_octomap()
+
+
+    def go_to_pose(self, arg_pose):                                  
+        """
+        Function to make manipulator go to a particular position in cordinate space
+        """
+        pose_values = self._group.get_current_pose().pose
+        rospy.loginfo('\033[94m' + ">>> Current Pose:" + '\033[0m')
+        rospy.loginfo(pose_values)
+
+        self._group.set_pose_target(arg_pose)
+        flag_plan = self._group.go(wait=True)  # wait=False for Async Move
+
+        pose_values = self._group.get_current_pose().pose
+        rospy.loginfo('\033[94m' + ">>> Final Pose:" + '\033[0m')
+        rospy.loginfo(pose_values)
+
+        list_joint_values = self._group.get_current_joint_values()
+        rospy.loginfo('\033[94m' + ">>> Final Joint Values:" + '\033[0m')
+        rospy.loginfo(list_joint_values)
+
+        if (flag_plan == True):
+            rospy.loginfo(
+                '\033[94m' + ">>> go_to_pose() Success" + '\033[0m')
+        else:
+            rospy.logerr(
+                '\033[94m' + ">>> go_to_pose() Failed. Solution for Pose not Found." + '\033[0m')
+
+        return flag_plan
+
+
+
+ 
+    def func_callback_topic_my_topic(self,msg):                          
+        """
+        callback function for mqtt subscription messages 
+        """
+        ur5=Camera1(sys.argv[1])
+        
+        
+        self.res = json.loads(str(msg.message)) 
+        r=json.dumps(self.res)
+        print("The cooooooooooooooonverted dictionary : " + str(r))
+        self.x= self.res["item"]
+        print(self.x)
+
+        self.order_id=self.res["order_id"]
+        print(self.order_id)
+        print(self.city)
+        self.city=self.res["city"]
+        self.qty=self.res["qty"]
+        
+        if self.x=="Medicine":
+            self.queue.append(1)
+            self._cost="450"
+            self.prior="HP"
+            city_queue.append(self.city)
+            orderid_queue.append(self.order_id)
+        
+        if self.x=="Food": 
+            self.queue.append(2)   
+            self._cost="250"
+            self.prior="MP"
+            city_queue.append(self.city)
+            print(city_queue)
+            orderid_queue.append(self.order_id) 
+            print(orderid_queue)            
+                       
+
+        
+        if self.x=="Clothes":
+            self.queue.append(3) 
+            self._cost="100"   
+            self.prior="LP"       
+            
+            city_queue.append(self.city)
+            print(city_queue)
+            #  
+            orderid_queue.append(self.order_id)
+
+            print(orderid_queue)      
+
+        self.queue.sort(reverse=True) 
+
+    def sort(self,arg):  
+        """
+        this function sorts boxes based on their color take color as arguement 
+        """                                                         
+        ur5=Camera1(sys.argv[1])
+        
+        box_length = 0.15               # Length of the Package
+        vacuum_gripper_width = 0.115    # Vacuum Gripper Width
+        delta = vacuum_gripper_width + (box_length/2)  # 0.19
+        
+
+        ur5_2_home_pose = geometry_msgs.msg.Pose()
+        ur5_2_home_pose.position.x = -0.8
+        ur5_2_home_pose.position.y = 0
+        ur5_2_home_pose.position.z = 1 + vacuum_gripper_width + (box_length/2)
+        # This to keep EE parallel to Ground Plane
+        ur5_2_home_pose.orientation.x = -0.5
+        ur5_2_home_pose.orientation.y = -0.5
+        ur5_2_home_pose.orientation.z = 0.5
+        ur5_2_home_pose.orientation.w = 0.5
+
+        lst_joint_angles_3bin = [math.radians(-93.6490004605),
+                                math.radians(-59.86883228533),
+                                math.radians(64.8815267484),
+                                math.radians(-92.844279839),
+                                math.radians(-90.9544745733),
+                                math.radians(-4.2974377536)]
+        lst_joint_angles_1bin = [math.radians(-82.5117089061),
+                                math.radians(-142.8833841853),
+                                math.radians(-53.2705714766),
+                                math.radians(-72.1382946652),
+                                math.radians(84.3717731754),
+                                math.radians(103.148176109)]
+        lst_joint_angles_2bin = [math.radians(-178),
+                                math.radians(-154.6633841853),
+                                math.radians(-28.2705714766),
+                                math.radians(-81.3882946652),
+                                math.radians(92.3717731754),
+                                math.radians(7.848176109)]
+
+        lst_joint_angles_belt = [math.radians(-163.937213368),
+                                math.radians(4.138717),
+                                math.radians(-32.618309),
+                                math.radians(-61.991236),
+                                math.radians(-88.3772820),
+                                math.radians(-73.97428753)]
+
+
+
+
+
+        if arg=="yellow":
+            ur5.gripper("true")
+            ur5.hard_set_joint_angles(lst_joint_angles_2bin,5)
+            ur5.conveyor(50) 
+            ur5.gripper("")
+               
+            ur5.hard_set_joint_angles(lst_joint_angles_belt,5)
+           
+            ur5.sheetpush_shipped("","","Food","MP","1","250","Shipped",str(ur5.get_time_str(0)),str(ur5.get_time_str(3)))
+            
+        if arg=="red":
+            ur5.gripper("true")
+            ur5.hard_set_joint_angles(lst_joint_angles_1bin,5) 
+            ur5.conveyor(50)
+            ur5.gripper("")
+            
+            ur5.hard_set_joint_angles(lst_joint_angles_belt,5)  
+                     
+            ur5.sheetpush_shipped("","","Medicines","HP","1","450","Shipped",str(ur5.get_time_str(0)),str(ur5.get_time_str(1)))
+            
+        if arg=="green":
+            ur5.gripper("true")
+            ur5.hard_set_joint_angles(lst_joint_angles_3bin,5) 
+            ur5.conveyor(50)
+            ur5.gripper("")
+ 
+            ur5.hard_set_joint_angles(lst_joint_angles_belt,5)
+        
+            ur5.sheetpush_shipped(orderid_queue.pop(0),city_queue.pop(0),"Clothes","LP","1","100","Shipped",str(ur5.get_time_str(0)),str(ur5.get_time_str(5)))#ur5.get_time_str(0),ur5.get_time_str(2))  
+
+    def get_time_str(self,arg):
+        """
+        function to get required date and time takes arg for addition of days to particular day
+        """ 
+        
+        print(datetime.datetime.today())  #print today's date time
+        new_date = datetime.datetime.today() + timedelta(arg)
+        print (new_date) #print new date time after addition of days to the current date
+        
+        if arg==0:
+            return datetime.datetime.today()
+        else:
+            return new_date
+
+
+    def callback(self,msg):   
+        """
+        callback function called when a message is received from logical camera
+        """                                           
+        ur5= Camera1(sys.argv[1])
+        global color00,color01,color02,color10,color11,color12,color20,color21,color22
+        
+
+        lst_joint_angles_belt = [math.radians(-163.937213368),
+                                math.radians(4.138717),
+                                math.radians(-32.618309),
+                                math.radians(-61.991236),
+                                math.radians(-88.3772820),
+                                math.radians(-73.97428753)]
+
+
+
+
+        box_length = 0.15               # Length of the Package
+        vacuum_gripper_width = 0.115    # Vacuum Gripper Width
+        delta = vacuum_gripper_width + (box_length/2)  # 0.19
+        
+
+        ur5_2_home_pose = geometry_msgs.msg.Pose()
+        ur5_2_home_pose.position.x = -0.8
+        ur5_2_home_pose.position.y = 0
+        ur5_2_home_pose.position.z = 1 + vacuum_gripper_width + (box_length/2)
+        # This to keep EE parallel to Ground Plane
+        ur5_2_home_pose.orientation.x = -0.5
+        ur5_2_home_pose.orientation.y = -0.5
+        ur5_2_home_pose.orientation.z = 0.5
+        ur5_2_home_pose.orientation.w = 0.5
+        
+        try:
+            self.pkg=msg.models[-1].type
+            rospy.logwarn(self.pkg)
+            self.y_val=msg.models[-1].pose.position.y
+            
+            self.temp="{:.2f}".format(self.y_val)
+            rospy.logwarn(self.temp)
+        except IndexError:
+            rospy.logwarn("index not found")
+            
+            ur5.hard_set_joint_angles(lst_joint_angles_belt,5)
+
+            
+            
+        
+
+        
+        
+        if self.pkg=="packagen00" :
+            
+            ur5.conveyor(33)
+            if float(self.temp) < float(0.05) :
+                
+                rospy.logwarn("picking up package 00")
+                
+                ur5.sort("red")
+                
+                
+               
+        if self.pkg=="packagen12" :
+            
+            ur5.conveyor(20)
+            
+            
+            if  float(self.temp) < float(-0.02):
+                rospy.logwarn("picking up package 12")
+                ur5.sort("red")            
+                
+
+        
+        if self.pkg=="packagen21" :
+            
+            ur5.conveyor(20)
+            
+            
+            if  float(self.temp) < float(-0.02):
+                rospy.logwarn("picking up package 21")
+                ur5.sort("green")
+
+
+               
+
+        if self.pkg=="ur5" or self.pkg=="":
+
+            rospy.loginfo("Waiting for the Packages") 
+
+        
+        
+        if self.pkg=="packagen01" :
+            
+            ur5.conveyor(33)
+            
+            
+            if  float(self.temp) < float(-0.02):
+                rospy.logwarn("picking up package 01")
+                ur5.sort("yellow")
+
+
+        if self.pkg=="packagen10" :
+            
+            ur5.conveyor(23)
+            
+            
+            if  float(self.temp) < float(-0.02):
+                rospy.logwarn("picking up package 10")
+                ur5.sort(color10)
+                     
+
+
+        if self.pkg=="packagen22" :
+            
+            ur5.conveyor(23)
+            
+            
+            if  float(self.temp) < float(-0.02):
+                rospy.logwarn("picking up package 22")
+                ur5.sort(color22)
+
+
+
+        
+        if self.pkg=="packagen02": 
+            
+            ur5.conveyor(30)
+            
+            
+            if float(self.temp) < float(-0.02):
+                rospy.logwarn("picking up package 02")
+                ur5.sort("green") 
+
+
+
+
+
+        if self.pkg=="packagen11" :
+            ur5.conveyor(50)
+            
+            
+            
+            if  float(self.temp) < float(-0.02):
+                rospy.logwarn("picking up package 11")
+                ur5.sort(color11)
+                 
+
+        if self.pkg=="packagen20" :
+            
+            ur5.conveyor(50)
+            
+            
+            if  float(self.temp) < float(-0.02):
+                rospy.logwarn("picking up package 20")
+                ur5.sort(color20)
+
+
+        
+
+
+
+ 
+
+def main():
+  
+    rospy.init_node('node_qr', anonymous=True)
+    ur5=Camera1(sys.argv[1])
+    
+    
+
+    rospy.Subscriber("/eyrc/vb/logical_camera_2",LogicalCameraImage,ur5.callback,queue_size=1, buff_size = 2**28)
+
+    rospy.logwarn("-----------------------------------------------------------------")
+    rospy.Subscriber("/ros_iot_bridge/mqtt/sub", msgMqttSub,ur5.func_callback_topic_my_topic,queue_size=1, buff_size = 2**28)
+    rospy.logwarn("*****************************************************************")
+    rospy.Subscriber("/eyrc/vb/camera_1/image_raw", Image,ur5.call,queue_size=1, buff_size = 2**28)
+    
+    rospy.spin()
+
+
+if __name__ == '__main__':
+    main()
