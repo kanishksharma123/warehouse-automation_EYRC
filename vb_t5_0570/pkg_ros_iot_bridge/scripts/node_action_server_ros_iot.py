@@ -33,7 +33,7 @@ class IotRosBridgeActionServer:
     
     
 
-
+    
         '''
             * self.on_goal - It is the fuction pointer which points to a function which will be called
                              when the Action Server receives a Goal.
